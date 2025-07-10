@@ -1,0 +1,6 @@
+@EinAutomation.Api_HostAddress = http://localhost:5190
+
+GET {{EinAutomation.Api_HostAddress}}/weatherforecast/
+Accept: application/json
+
+###
