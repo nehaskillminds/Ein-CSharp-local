@@ -271,4 +271,195 @@ namespace EinAutomation.Api.Services
                     return false;
                 }
             }
-    }}
+
+// Alternative overload that maintains backward compatibility
+public async Task<bool> NotifySalesforceErrorCodeAsync(string? entityProcessId, string? errorCode, string? status = "fail")
+{
+    return await NotifySalesforceErrorCodeAsync(entityProcessId, errorCode, status, null, null);
+}
+
+        public async Task<bool> NotifyScreenshotUploadToSalesforceAsync(string? entityProcessId, string? blobUrl, string? entityName, string? docType)
+        {
+            if (string.IsNullOrEmpty(entityProcessId) || string.IsNullOrEmpty(blobUrl) || string.IsNullOrEmpty(entityName) || string.IsNullOrEmpty(docType))
+            {
+                _logger.LogError("Invalid input parameters for NotifyScreenshotUploadToSalesforceAsync: entityProcessId, blobUrl, entityName, or docType is null or empty");
+                return false;
+            }
+
+            try
+            {
+                _logger.LogInformation("Notifying PDF upload for entity process ID: {EntityProcessId}, Document Type: {DocType}", 
+                    entityProcessId, docType);
+
+                if (!await EnsureAuthenticatedAsync())
+                {
+                    _logger.LogError("Failed to authenticate with Salesforce");
+                    return false;
+                }
+
+                var cleanName = Regex.Replace(entityName, @"\s+", "");
+                var fileSuffix = docType == "letter" ? "EINLetter" : "EINConfirmation";
+                var fileName = $"{cleanName}-ID-{fileSuffix}";
+                var extension = "pdf";
+                var migrationId = $"{blobUrl.GetHashCode()}_{DateTimeOffset.UtcNow.ToUnixTimeSeconds()}";
+
+                var payload = new
+                {
+                    Name = $"{fileName}.pdf",
+                    File_Extension__c = extension,
+                    Migration_ID__c = migrationId,
+                    File_Name__c = fileName,
+                    Parent_Name__c = "EntityProcess",
+                    Entity_Process_Id__c = entityProcessId,
+                    Blob_URL__c = blobUrl,
+                    Is_Content_Created__c = false,
+                    Is_Errored__c = false,
+                    Historical_Record__c = false,
+                    Exclude_from_Partner_API__c = false,
+                    Deleted_by_Client__c = false,
+                    Hidden_From_Client__c = (docType != "letter")
+                };
+
+                var apiVersion = docType == "letter" ? "v63.0" : "v59.0";
+                var url = $"{_instanceUrl}/services/data/{apiVersion}/sobjects/Content_Migration__c/";
+
+                var jsonContent = new StringContent(JsonSerializer.Serialize(payload), Encoding.UTF8, "application/json");
+
+                _httpClient.DefaultRequestHeaders.Clear();
+                _httpClient.DefaultRequestHeaders.Add("Authorization", $"Bearer {_accessToken}");
+
+                var response = await _httpClient.PostAsync(url, jsonContent);
+
+                if (response.IsSuccessStatusCode)
+                {
+                    _logger.LogInformation("{FileSuffix} upload notification sent successfully", fileSuffix);
+                    return true;
+                }
+                else
+                {
+                    var errorContent = await response.Content.ReadAsStringAsync();
+                    _logger.LogError("Failed to notify upload ({DocType}): {StatusCode} - {Error}", 
+                        docType, response.StatusCode, errorContent);
+                    return false;
+                }
+            }
+            catch (Exception ex)
+            {
+                _logger.LogError(ex, "Error in NotifyScreenshotUploadToSalesforceAsync");
+                return false;
+            }
+        }
+
+        public async Task<bool> NotifyEinLetterToSalesforceAsync(string? entityProcessId, string? blobUrl, string? entityName)
+        {
+            return await NotifyScreenshotUploadToSalesforceAsync(entityProcessId, blobUrl, entityName, "letter");
+        }
+
+        public async Task<bool> NotifyConfirmationAsync(string? entityProcessId, string? blobUrl, string? entityName)
+        {
+            return await NotifyScreenshotUploadToSalesforceAsync(entityProcessId, blobUrl, entityName, "confirmation");
+        }
+
+        private class SalesforceTokenResponse
+        {
+            public string? access_token { get; set; }
+            public string? instance_url { get; set; }
+            public string? token_type { get; set; }
+        }
+
+        public async Task NotifyContentMigrationAsync(string? entityProcessId, string? blobUrl, string? fileName, string? extension, bool hiddenFromClient, CancellationToken ct)
+        {
+            if (string.IsNullOrEmpty(entityProcessId) || string.IsNullOrEmpty(blobUrl) || string.IsNullOrEmpty(fileName) || string.IsNullOrEmpty(extension))
+            {
+                _logger.LogWarning("Invalid input parameters for NotifyContentMigrationAsync: entityProcessId, blobUrl, fileName, or extension is null or empty");
+                return;
+            }
+
+            if (!await EnsureAuthenticatedAsync())
+            {
+                _logger.LogError("Failed to authenticate with Salesforce");
+                return;
+            }
+
+            var payload = new
+            {
+                Name = $"{fileName}.{extension}",
+                File_Extension__c = extension,
+                Migration_ID__c = $"{blobUrl.GetHashCode()}_{DateTimeOffset.UtcNow.ToUnixTimeSeconds()}",
+                File_Name__c = fileName,
+                Parent_Name__c = "EntityProcess",
+                Entity_Process_Id__c = entityProcessId,
+                Blob_URL__c = blobUrl,
+                Is_Content_Created__c = false,
+                Is_Errored__c = false,
+                Historical_Record__c = false,
+                Exclude_from_Partner_API__c = false,
+                Deleted_by_Client__c = false,
+                Hidden_From_Client__c = hiddenFromClient
+            };
+
+            var url = $"{_instanceUrl}/services/data/v59.0/sobjects/Content_Migration__c/";
+            var content = new StringContent(JsonSerializer.Serialize(payload), Encoding.UTF8, "application/json");
+
+            _httpClient.DefaultRequestHeaders.Clear();
+            _httpClient.DefaultRequestHeaders.Add("Authorization", $"Bearer {_accessToken}");
+
+            var response = await _httpClient.PostAsync(url, content, ct);
+
+            if (!response.IsSuccessStatusCode)
+            {
+                var error = await response.Content.ReadAsStringAsync();
+                _logger.LogError("Failed to notify content migration: {StatusCode} - {Error}", response.StatusCode, error);
+                return;
+            }
+            else
+            {
+                _logger.LogInformation("Salesforce content migration recorded for {FileName}", fileName);
+                return;
+            }
+        }
+
+        public async Task UpdateEinStatusAsync(string? entityProcessId, string? status, string? einNumber, string? errorCode, CancellationToken ct)
+        {
+            if (string.IsNullOrEmpty(entityProcessId) || string.IsNullOrEmpty(status))
+            {
+                _logger.LogError("Invalid input parameters for UpdateEinStatusAsync: entityProcessId or status is null or empty");
+                return;
+            }
+
+            if (!await EnsureAuthenticatedAsync())
+            {
+                _logger.LogError("Failed to authenticate with Salesforce");
+                return;
+            }
+
+            var url = $"{_instanceUrl}/services/apexrest/service/v2/formautomation/ein/update?entityProcessId={entityProcessId}";
+            var payload = new
+            {
+                entityProcessId,
+                einNumber = einNumber ?? "",
+                errorCode = errorCode ?? "",
+                status
+            };
+
+            var jsonContent = new StringContent(JsonSerializer.Serialize(payload), Encoding.UTF8, "application/json");
+
+            _httpClient.DefaultRequestHeaders.Clear();
+            _httpClient.DefaultRequestHeaders.Add("Authorization", $"Bearer {_accessToken}");
+
+            var response = await _httpClient.PostAsync(url, jsonContent, ct);
+
+            if (!response.IsSuccessStatusCode)
+            {
+                var error = await response.Content.ReadAsStringAsync();
+                _logger.LogError("Failed to update EIN status: {StatusCode} - {Error}", response.StatusCode, error);
+            }
+            else
+            {
+                _logger.LogInformation("Updated EIN status for entity process ID: {EntityProcessId}", entityProcessId);
+            }
+
+            return;
+        }
+    }
+}
